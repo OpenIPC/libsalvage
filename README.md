@@ -22,16 +22,18 @@ into a player, a GStreamer element, or a test harness.
 | FlexFEC (RFC 8627) recovery | **done** — verified against a real camera capture |
 | RTP depacketisation (RFC 6184 / 7798) | **done** — byte-exact against the wire |
 | slice salvage and first-slice synthesis | **done** — measured against a real decoder |
-| end-to-end under `netem` | not started |
+| end-to-end over a Gilbert-Elliott channel | **done** — `scripts/e2e.sh` |
 
 ## Building
 
 ```sh
 make check          # unit tests + capture replay
 make asan           # the same, under AddressSanitizer and UBSan
+./scripts/e2e.sh    # end to end over a lossy channel (needs ffmpeg)
 ```
 
-No configure step, no dependencies.
+No configure step, no dependencies beyond libc; `scripts/e2e.sh` additionally
+wants ffmpeg to do the decoding.
 
 ## What "verified" means here
 
@@ -114,6 +116,62 @@ were not.
 What to do with a slice merely cut short by loss is a policy bit, not a
 constant: forwarding it measured better on Intel (0.49% dirty pixels against
 0.90%) and worse on Rockchip (30.80% against 25.47%). It is a parameter here.
+
+## End to end
+
+`scripts/e2e.sh` replays the capture over a Gilbert-Elliott channel, runs it
+through the receiver, decodes the result and measures it against the intact
+stream. The channel takes the same two parameters as
+`majestic/2026-08-06-ltr/fecsim.py` — mean loss and mean burst length — so what
+is measured here and what that predicts can be put side by side. Runs are seeded,
+so a result can be reproduced exactly.
+
+```
+channel: Gilbert-Elliott, mean burst 4, seed 1        reference: 163 frames
+
+loss   config        dropped recovrd   intact repaired  frames   psnr_y
+1%     raw                19       0      158        -     163  54.89
+1%     fec                19       5      160        -     163  55.44
+1%     fec+salvage        19       5      160        0     163  55.42
+2%     raw                37       0      152        -     163  49.71
+2%     fec                37      14      159        -     163  53.84
+2%     fec+salvage        37      14      159        0     163  53.85
+5%     raw               129       0      142        -     163  45.15
+5%     fec               129      24      150        -     163  46.52
+5%     fec+salvage       129      24      150        0     163  46.52
+10%    raw               315       0      113        -     161  misaligned
+10%    fec               315      97      140        -     163  41.62
+10%    fec+salvage       315      97      140        1     163  41.61
+```
+
+At 10% the raw stream decodes 161 frames instead of 163 — it has lost pictures
+outright, which is why there is no PSNR for it: comparing frame N against frame
+N+2 would produce a number, and the number would be meaningless.
+
+### The salvage stage almost never fires here, and that is the finding
+
+Across the whole sweep it synthesises a first slice once. That is not a
+disappointing result, it is a measurement of how the two mechanisms divide the
+work, and it is worth stating plainly rather than dressing up:
+
+```
+8% loss, mean burst 4    with FEC: 2 pictures lost slice 0    without: 8
+8% loss, mean burst 30   with FEC: 1 picture  lost slice 0    without: 3
+```
+
+FEC absorbs first-slice loss almost entirely, and for a reason that follows
+directly from the sender flaw above: an inter picture's first slice is one or
+two packets, and a one-packet protection group carries a whole repair packet, so
+it survives anything short of losing both. Salvage is the backstop for the cases
+that get through — and when one does, it repairs it. Aimed at the case
+deliberately, by dropping slice 0 from every third picture, it recovers
+2.06 dB.
+
+The balance would shift if the sender's group size were bounded. Protection
+would move from the inter slices that barely need it to the keyframes that do,
+first-slice loss on inter pictures would become common again, and the salvage
+stage would go from backstop to load-bearing. That is an argument for making
+both, not for choosing between them.
 
 ## What building the receiver found in the sender
 

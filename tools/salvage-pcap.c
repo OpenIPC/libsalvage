@@ -217,6 +217,15 @@ typedef struct {
     unsigned drop_every;   /* drop 1 media packet in N, 0 = none */
     bool no_fec;           /* bypass recovery, to isolate its contribution */
     unsigned drop_first;   /* drop slice 0 of every Nth picture, 0 = none */
+
+    /* Gilbert-Elliott, parameterised exactly as fecsim.py does it so the
+     * measured and simulated numbers can be put side by side: q = 1/mean_burst
+     * is the chance of leaving the bad state, p = q*loss/(1-loss) the chance of
+     * entering it. Uniform loss is not what a wireless link does — losses come
+     * in runs, and a run is what defeats XOR FEC. */
+    double ge_p, ge_q;
+    bool ge_on, ge_bad;
+    uint64_t rng;
     bool h265;
     unsigned pic_index;
     bool in_first_slice;
@@ -271,6 +280,31 @@ static void classify(Replay *r, const uint8_t *pay, size_t len) {
     }
 }
 
+/* xorshift64*, so a run is reproducible from its seed. */
+static double next_random(Replay *r) {
+    r->rng ^= r->rng >> 12;
+    r->rng ^= r->rng << 25;
+    r->rng ^= r->rng >> 27;
+    return (double)((r->rng * 2685821657736338717ull) >> 11) /
+           (double)(1ull << 53);
+}
+
+static bool ge_drop(Replay *r) {
+    bool lost;
+    if (r->ge_bad) {
+        lost = true;
+        if (next_random(r) < r->ge_q) {
+            r->ge_bad = false;
+        }
+    } else {
+        lost = false;
+        if (next_random(r) < r->ge_p) {
+            r->ge_bad = true;
+        }
+    }
+    return lost;
+}
+
 static void on_pkt(const uint8_t *p, size_t len, void *ctx) {
     Replay *r = ctx;
     if (len < RTP_HDR || (p[0] >> 6) != 2) {
@@ -292,6 +326,11 @@ static void on_pkt(const uint8_t *p, size_t len, void *ctx) {
             (r->pic_index % r->drop_first) == 0) {
             r->dropped++;
             r->first_slice_dropped++;
+            was_dropped[seq] = true;
+            return;
+        }
+        if (r->ge_on && ge_drop(r)) {
+            r->dropped++;
             was_dropped[seq] = true;
             return;
         }
@@ -324,6 +363,8 @@ int main(int argc, char **argv) {
     const char *path = NULL;
     SalvageCodec codec = SALVAGE_H264;
     bool salvage_off = false;
+    double loss_pct = 0.0, mean_burst = 1.0;
+    uint64_t seed = 1;
     SalvagePolicy policy = {
         .truncated = SALVAGE_TRUNCATED_FORWARD,
         .synthesise_first_slice = true,
@@ -343,6 +384,12 @@ int main(int argc, char **argv) {
             r.no_fec = true;
         } else if (!strcmp(argv[i], "--drop-first-slice") && i + 1 < argc) {
             r.drop_first = (unsigned)atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--loss") && i + 1 < argc) {
+            loss_pct = atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--mean-burst") && i + 1 < argc) {
+            mean_burst = atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--seed") && i + 1 < argc) {
+            seed = (uint64_t)strtoull(argv[++i], NULL, 10);
         } else if (!strcmp(argv[i], "--verify-retarget")) {
             verify_retarget = true;
         } else if (!strcmp(argv[i], "--no-salvage")) {
@@ -369,9 +416,19 @@ int main(int argc, char **argv) {
                 "usage: %s [--media-pt N] [--fec-pt N] [--drop N] [--burst N]"
                 " [--no-fec] [--h265] [--annexb FILE]\n"
                 "       [--drop-first-slice N] [--no-salvage] [--no-synth]"
-                " [--drop-truncated] [--verify-retarget] capture.pcap\n",
+                " [--drop-truncated] [--verify-retarget]\n"
+                "       [--loss PCT] [--mean-burst N] [--seed S]"
+                " capture.pcap\n",
                 argv[0]);
         return 2;
+    }
+
+    if (loss_pct > 0.0) {
+        const double loss = loss_pct / 100.0;
+        r.ge_q = mean_burst > 1.0 ? 1.0 / mean_burst : 1.0;
+        r.ge_p = loss < 1.0 ? r.ge_q * loss / (1.0 - loss) : 1.0;
+        r.ge_on = true;
+        r.rng = seed ? seed : 1;
     }
 
     if (!salvage_off) {
@@ -397,6 +454,10 @@ int main(int argc, char **argv) {
     SalvageFecStats s;
     salvage_fec_stats(r.fec, &s);
 
+    if (r.ge_on) {
+        printf("Gilbert-Elliott: %.1f%% loss, mean burst %.1f, seed %llu\n",
+               loss_pct, mean_burst, (unsigned long long)seed);
+    }
     if (r.drop_every) {
         printf("dropped 1 media packet in %u", r.drop_every);
         if (r.burst > 1) {
