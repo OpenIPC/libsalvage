@@ -21,7 +21,7 @@ into a player, a GStreamer element, or a test harness.
 |---|---|
 | FlexFEC (RFC 8627) recovery | **done** — verified against a real camera capture |
 | RTP depacketisation (RFC 6184 / 7798) | **done** — byte-exact against the wire |
-| slice salvage and first-slice synthesis | not started |
+| slice salvage and first-slice synthesis | **done** — measured against a real decoder |
 | end-to-end under `netem` | not started |
 
 ## Building
@@ -78,6 +78,42 @@ same 1-in-50 event rate, recovery falls from 100% to 42% at bursts of 2 and
 23.5% at bursts of 5, because a burst puts several losses inside one protection
 group. This is the argument for interleaving protection groups rather than for
 adding repair packets.
+
+### Salvaging a picture that lost its first slice
+
+Slice 0 carries the picture-level parameters the rest depend on, so losing it
+is categorically worse than losing any other slice. The repair is to replay the
+previous picture's first slice with its `frame_num` and POC retargeted to this
+picture — both are fixed-width fields, so it is an in-place patch with no bit
+shifting and no CABAC re-alignment.
+
+Measured by dropping slice 0 from every third picture in the camera capture and
+decoding both versions against the intact stream:
+
+```
+                        mean PSNR (luma)
+no repair                    49.90 dB
+first slice synthesised      51.96 dB     +2.06 dB
+```
+
+134 pictures improve, mean +1.78 dB and up to +3.93 dB. Twelve come out ~0.2 dB
+worse; they all follow a keyframe that lost its own first slice, so what they
+show is the decoder concealing that, not a bad stand-in. That was worth checking
+rather than assuming: the obvious precaution — discarding the stand-in whenever
+an IRAP goes past, on the grounds that pre-IDR content is stale — makes things
+*worse* (+1.54 dB instead of +2.06 dB) and does not remove a single one of the
+twelve. The code keeps the stand-in across IRAPs because the measurement said so.
+
+Two constraints the code will not cross. A stand-in is only used when its NAL
+type matches the picture it is standing in for, because replaying an IDR into an
+inter picture tells the decoder to reset. And the picture's identity is read
+from a slice that *survived* — every slice of a picture carries the same
+`frame_num` and POC, so the one that was lost can be described by the ones that
+were not.
+
+What to do with a slice merely cut short by loss is a policy bit, not a
+constant: forwarding it measured better on Intel (0.49% dirty pixels against
+0.90%) and worse on Rockchip (30.80% against 25.47%). It is a parameter here.
 
 ## What building the receiver found in the sender
 
@@ -147,15 +183,28 @@ above wearing a different hat, which is why both have tests.
 progress.** A packet rebuilt by one repair packet is often the last one another
 was waiting for, and a packet released from the window is gone for good.
 
+The slice surgery has one test that carries most of the weight: rewriting a
+slice's `frame_num` and POC to the values it already holds must give back the
+original bytes exactly. It runs the entire path — emulation prevention stripped
+and restored, every `ue(v)` walked to find the offsets, the patch applied — so a
+mistake anywhere shows up as a byte difference. `make check` runs it over all
+1303 slices in the capture, not just the two the unit test embeds.
+
 ## Layout
 
 ```
 include/salvage/flexfec.h   FlexFEC recovery API
 include/salvage/depay.h     depacketisation API
+include/salvage/salvage.h   slice salvage API
 src/flexfec.c               recovery core
 src/depay.c                 RFC 6184 / 7798 depacketisation, Annex-B output
+src/bits.h  src/bits.c      bit reader, emulation prevention, bit patching
+src/retarget.h  .c          SPS/PPS parsing and slice-header offsets
+src/salvage.c               first-slice synthesis and truncated-slice policy
 tests/flexfec.c             unit tests (repair packets built from the RFC)
 tests/depay.c               unit tests (mostly about damage)
+tests/salvage.c             unit tests, on real parameter sets and slices
+tests/streamdata.h          those parameter sets and slices, from the capture
 tests/camera-fec.pcap       real capture: SSC30KQ, H.264, FlexFEC enabled
 tools/salvage-pcap.c        capture replay with loss injection
 ```
