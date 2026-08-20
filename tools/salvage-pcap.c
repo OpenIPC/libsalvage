@@ -8,6 +8,7 @@
  * one that produces none, because the damage reaches the picture silently.
  */
 
+#include <salvage/depay.h>
 #include <salvage/flexfec.h>
 
 #include <inttypes.h>
@@ -27,8 +28,33 @@ static Orig originals[MAX_SEQ];
 static uint64_t verified, wrong, unknown;
 static bool was_dropped[MAX_SEQ], was_recovered[MAX_SEQ];
 
+/* Access-unit accounting, fed by the depacketiser behind the FEC layer. */
+static SalvageDepay *depay;
+static FILE *annexb;
+static uint64_t au_total, au_complete, au_no_first_slice, au_nals,
+    au_partial_nals, au_dropped_nals, au_lost_packets;
+
+static void on_au(const SalvageAu *au, void *ctx) {
+    (void)ctx;
+    au_total++;
+    au_complete += au->complete;
+    au_no_first_slice += !au->has_first_slice;
+    au_nals += au->nal_count;
+    for (size_t i = 0; i < au->nal_count; i++) {
+        au_partial_nals += !au->nals[i].complete;
+    }
+    au_dropped_nals += au->dropped_nals;
+    au_lost_packets += au->lost_packets;
+    if (annexb != NULL) {
+        fwrite(au->data, 1, au->len, annexb);
+    }
+}
+
 static void on_out(const uint8_t *pkt, size_t len, bool recovered, void *ctx) {
     (void)ctx;
+    if (depay != NULL) {
+        salvage_depay_input(depay, pkt, len, recovered);
+    }
     if (!recovered) {
         return; /* received packets are trivially correct */
     }
@@ -119,6 +145,7 @@ typedef struct {
     SalvageFec *fec;
     uint8_t media_pt, fec_pt;
     unsigned drop_every;   /* drop 1 media packet in N, 0 = none */
+    bool no_fec;           /* bypass recovery, to isolate its contribution */
     unsigned burst;        /* consecutive packets per drop event */
     uint64_t media_seen, dropped;
     unsigned burst_left;
@@ -156,11 +183,18 @@ static void on_pkt(const uint8_t *p, size_t len, void *ctx) {
         return;
     }
 
+    if (r->no_fec) {
+        if (pt == r->media_pt) {
+            on_out(p, len, false, NULL);
+        }
+        return;
+    }
     salvage_fec_input(r->fec, p, len);
 }
 
 int main(int argc, char **argv) {
     const char *path = NULL;
+    SalvageCodec codec = SALVAGE_H264;
     Replay r = {.media_pt = 96, .fec_pt = 101, .burst = 1};
 
     for (int i = 1; i < argc; i++) {
@@ -172,6 +206,16 @@ int main(int argc, char **argv) {
             r.drop_every = (unsigned)atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--burst") && i + 1 < argc) {
             r.burst = (unsigned)atoi(argv[++i]);
+        } else if (!strcmp(argv[i], "--no-fec")) {
+            r.no_fec = true;
+        } else if (!strcmp(argv[i], "--h265")) {
+            codec = SALVAGE_H265;
+        } else if (!strcmp(argv[i], "--annexb") && i + 1 < argc) {
+            annexb = fopen(argv[++i], "wb");
+            if (annexb == NULL) {
+                perror(argv[i]);
+                return 1;
+            }
         } else {
             path = argv[i];
         }
@@ -179,13 +223,14 @@ int main(int argc, char **argv) {
     if (path == NULL) {
         fprintf(stderr,
                 "usage: %s [--media-pt N] [--fec-pt N] [--drop N] [--burst N]"
-                " capture.pcap\n",
+                " [--no-fec] [--h265] [--annexb FILE] capture.pcap\n",
                 argv[0]);
         return 2;
     }
 
+    depay = salvage_depay_new(codec, 0, on_au, NULL);
     r.fec = salvage_fec_new(r.media_pt, r.fec_pt, 512, on_out, NULL);
-    if (r.fec == NULL) {
+    if (r.fec == NULL || depay == NULL) {
         fprintf(stderr, "out of memory\n");
         return 1;
     }
@@ -194,6 +239,7 @@ int main(int argc, char **argv) {
         return 1;
     }
     salvage_fec_flush(r.fec);
+    salvage_depay_flush(depay);
 
     SalvageFecStats s;
     salvage_fec_stats(r.fec, &s);
@@ -229,12 +275,26 @@ int main(int argc, char **argv) {
         printf("\n");
     }
 
+    printf("\naccess units    : %" PRIu64 " (%" PRIu64 " intact, %" PRIu64
+           " damaged)\n",
+           au_total, au_complete, au_total - au_complete);
+    printf("NAL units       : %" PRIu64 " (%" PRIu64 " truncated, %" PRIu64
+           " unusable)\n",
+           au_nals, au_partial_nals, au_dropped_nals);
+    printf("packet gaps seen by the depacketiser : %" PRIu64 "\n",
+           au_lost_packets);
+    printf("pictures with no first slice : %" PRIu64 "\n", au_no_first_slice);
+
     if (r.dropped) {
         printf("\nrecovery rate: %.1f%% of dropped packets\n",
                100.0 * (double)s.recovered / (double)r.dropped);
     }
 
     salvage_fec_free(r.fec);
+    salvage_depay_free(depay);
+    if (annexb != NULL) {
+        fclose(annexb);
+    }
     for (int i = 0; i < MAX_SEQ; i++) {
         free(originals[i].data);
     }

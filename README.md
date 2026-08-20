@@ -20,7 +20,7 @@ into a player, a GStreamer element, or a test harness.
 | stage | state |
 |---|---|
 | FlexFEC (RFC 8627) recovery | **done** — verified against a real camera capture |
-| RTP depacketisation (RFC 6184 / 7798) | not started |
+| RTP depacketisation (RFC 6184 / 7798) | **done** — byte-exact against the wire |
 | slice salvage and first-slice synthesis | not started |
 | end-to-end under `netem` | not started |
 
@@ -79,6 +79,53 @@ same 1-in-50 event rate, recovery falls from 100% to 42% at bursts of 2 and
 group. This is the argument for interleaving protection groups rather than for
 adding repair packets.
 
+## What building the receiver found in the sender
+
+A receiver that checks its input is a test rig for whatever is transmitting.
+Two faults turned up this way, neither visible from the sending side.
+
+### The marker bit fired on every slice
+
+RFC 6184 §5.1 puts the RTP marker on the last packet of an *access unit*.
+Majestic set it on the last packet of every *NAL*. Measured on the wire from an
+SSC30KQ at 2560×1920 with eight slices per picture:
+
+```
+markers 1062   pictures 131   markers not at a picture boundary: 931
+```
+
+A receiver that believes the marker therefore sees each slice as a whole
+picture. That is a plausible route to "the hardware decoder can't handle
+slices" — the decoder is handed eight one-slice pictures and does exactly what
+it was told. Fixed in majestic (`sstar: mark the real end of an access unit`),
+after which the same measurement gives 171 markers for 171 pictures, none
+misplaced.
+
+The depacketiser here does not simply trust the fix. The marker has to earn
+trust — timestamps decide the boundary until the marker has agreed with them
+twice running, and one disagreement disables it for the rest of the stream.
+
+### Protection was inverted: the keyframe is the least protected part
+
+The sender emits one repair packet per protection group and aligns groups to
+slices, so the code rate follows slice size rather than importance:
+
+| | groups | mean group | overhead | recovered at 1-in-5 |
+|---|---|---|---|---|
+| inter frames | 1300 | 1.4 packets | ~71% | effectively all |
+| keyframes | 99 | 16.5 packets (max 26) | ~6% | almost none |
+
+The consequence shows up per picture rather than per packet. At 1 in 5, 154 of
+163 pictures arrive intact — and the nine that do not are **exactly the nine
+keyframes**, each losing ~37 packets. Losing a keyframe costs the GOP; losing a
+P-slice costs one band of one picture that can be concealed. The protection is
+the wrong way round, and 40% of the link's overhead is being spent making the
+cheap case cheaper.
+
+This is not an argument for more FEC. It is an argument for bounding the group
+size so the code rate is uniform, and then applying unequal protection
+deliberately.
+
 ## Design notes
 
 Three things in the recovery core were not obvious, and each was a bug first.
@@ -103,12 +150,29 @@ was waiting for, and a packet released from the window is gone for good.
 ## Layout
 
 ```
-include/salvage/flexfec.h   public API
+include/salvage/flexfec.h   FlexFEC recovery API
+include/salvage/depay.h     depacketisation API
 src/flexfec.c               recovery core
+src/depay.c                 RFC 6184 / 7798 depacketisation, Annex-B output
 tests/flexfec.c             unit tests (repair packets built from the RFC)
+tests/depay.c               unit tests (mostly about damage)
 tests/camera-fec.pcap       real capture: SSC30KQ, H.264, FlexFEC enabled
 tools/salvage-pcap.c        capture replay with loss injection
 ```
+
+The depacketiser is checked the same way as the recovery core: replaying the
+capture and reconciling every byte against the wire. 1321 NAL units, 3459260
+payload bytes plus 5284 bytes of start codes, and an output file of exactly
+3464544 bytes — so nothing is dropped, duplicated or spliced. The result
+decodes as 163 frames at 2560×1920.
+
+One picture in that capture decodes with an error, and it is worth saying why,
+because the obvious conclusion is wrong. Picture 162 is missing the slice at
+`first_mb_in_slice=15360` while the slice after it is present, and there is no
+RTP sequence gap anywhere in the capture. The sender skipped a NAL; the network
+did not lose one. Damage that arrives without a hole in the sequence numbers is
+invisible to the FEC layer, which is why the salvage stage checks that slice
+coverage is contiguous rather than trusting packet accounting.
 
 The unit tests build their own repair packets straight from RFC 8627 rather
 than calling a shared helper, so an encoder and a decoder that share a
