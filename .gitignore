@@ -3,3 +3,4 @@ test-flexfec
 test-depay
 test-salvage
 *.o
+salvage-play

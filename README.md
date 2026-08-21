@@ -23,6 +23,7 @@ into a player, a GStreamer element, or a test harness.
 | RTP depacketisation (RFC 6184 / 7798) | **done** — byte-exact against the wire |
 | slice salvage and first-slice synthesis | **done** — measured against a real decoder |
 | end-to-end over a Gilbert-Elliott channel | **done** — software, Rockchip MPP, and Intel VA-API (below) |
+| reference player (per-platform hardware decode) | **done** — `salvage-play`, verified on MPP and VA-API |
 
 ## Building
 
@@ -32,8 +33,44 @@ make asan           # the same, under AddressSanitizer and UBSan
 ./scripts/e2e.sh    # end to end over a lossy channel (needs ffmpeg)
 ```
 
-No configure step, no dependencies beyond libc; `scripts/e2e.sh` additionally
-wants ffmpeg to do the decoding.
+The library and `salvage-pcap` have no dependencies beyond libc. `salvage-play`
+(below) links a hardware decoder if one is present; `make` compiles in whatever
+it finds:
+
+```sh
+make salvage-play                       # GStreamer if its dev packages are present
+make salvage-play MPP_CFLAGS=-I… \       # Rockchip MPP from a source checkout
+                  MPP_LIBS='-L… -lrockchip_mpp'
+```
+
+## The reference player
+
+`salvage-play` is the whole receiver end to end: replay an RTP capture through
+recover → depacketise → salvage, and hand each rebuilt picture to the platform's
+hardware decoder.
+
+```sh
+salvage-play --decoder gst capture.pcap        # GStreamer (Intel VA-API, …)
+salvage-play --decoder mpp --dump out.yuv capture.pcap   # Rockchip RKVDEC
+salvage-play --decoder null --annexb out.264 capture.pcap  # no decode
+```
+
+The decoder is a **different component per platform**, behind one interface
+(`include/salvage/decoder.h`), because the measurements above show the robust
+decoder is not the same silicon to silicon:
+
+- **`mpp`** — Rockchip RKVDEC via MPP, one access unit per packet with
+  `disable_error` so it decodes past damage instead of freeze-latching.
+- **`gst`** — GStreamer `decodebin`, which selects the platform's hardware
+  decoder itself (`vah264dec` on Intel, `mppvideodec` where that plugin is
+  installed) and conceals a lost slice rather than aborting on it.
+- **`null`** — writes Annex-B, no decode; the portable default.
+
+Verified on hardware feeding the same recovered stream: `mpp` decodes it on an
+RK3588 (RKVDEC), `gst` decodes it on a Radxa X4 through `vah264dec` (confirmed in
+the GStreamer factory log). `salvage-play` doubles as the commissioning harness
+— point it at a target decoder with `--intolerant` / `--drop-truncated` to
+measure the per-platform policy bits rather than inherit them.
 
 ## What "verified" means here
 
@@ -318,17 +355,22 @@ mistake anywhere shows up as a byte difference. `make check` runs it over all
 include/salvage/flexfec.h   FlexFEC recovery API
 include/salvage/depay.h     depacketisation API
 include/salvage/salvage.h   slice salvage API
+include/salvage/decoder.h   per-platform hardware-decode interface
 src/flexfec.c               recovery core
 src/depay.c                 RFC 6184 / 7798 depacketisation, Annex-B output
 src/bits.h  src/bits.c      bit reader, emulation prevention, bit patching
 src/retarget.h  .c          SPS/PPS parsing and slice-header offsets
 src/salvage.c               first-slice synthesis and truncated-slice policy
+src/decoder.c               backend dispatch + null backend
+src/decoder_gst.c           GStreamer backend (Intel VA-API, and generally)
+src/decoder_mpp.c           Rockchip MPP backend (RKVDEC)
 tests/flexfec.c             unit tests (repair packets built from the RFC)
 tests/depay.c               unit tests (mostly about damage)
 tests/salvage.c             unit tests, on real parameter sets and slices
 tests/streamdata.h          those parameter sets and slices, from the capture
 tests/camera-fec.pcap       real capture: SSC30KQ, H.264, FlexFEC enabled
 tools/salvage-pcap.c        capture replay with loss injection
+tools/salvage-play.c        reference player: recover -> salvage -> decode
 ```
 
 The depacketiser is checked the same way as the recovery core: replaying the
