@@ -48,3 +48,18 @@ jobs:
       - uses: actions/checkout@v4
       - name: make asan
         run: make asan
+
+  e2e:
+    # Optional smoke test of the whole pipeline: replay the capture over a
+    # Gilbert-Elliott channel through recover -> salvage -> decode and measure
+    # each config against the intact stream. It needs ffmpeg, so it is kept out
+    # of the required set — a red result here is a signal to look, not a merge
+    # blocker.
+    name: e2e (ffmpeg)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends ffmpeg
+      - name: scripts/e2e.sh
+        run: ./scripts/e2e.sh
