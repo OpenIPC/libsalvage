@@ -43,6 +43,7 @@ static bool verify_retarget;
 static void check_retarget(const SalvageAu *au);
 static uint64_t au_total, au_complete, au_no_first_slice, au_nals,
     au_partial_nals, au_dropped_nals, au_lost_packets;
+static uint64_t key_total, key_damaged, inter_total, inter_damaged;
 
 static void on_au(const SalvageAu *au, void *ctx) {
     (void)ctx;
@@ -55,6 +56,19 @@ static void on_au(const SalvageAu *au, void *ctx) {
     }
     au_dropped_nals += au->dropped_nals;
     au_lost_packets += au->lost_packets;
+    {   /* A damaged keyframe costs the whole GOP; a damaged inter picture
+         * costs one band of one picture. Counting them together hides the
+         * difference the protection policy is meant to exploit. */
+        bool key = false;
+        for (size_t i = 0; i < au->nal_count; i++) {
+            if (au->nals[i].type == 5 || (au->nals[i].type >= 16 &&
+                                          au->nals[i].type <= 23)) {
+                key = true;
+            }
+        }
+        if (key) { key_total++; key_damaged += !au->complete; }
+        else { inter_total++; inter_damaged += !au->complete; }
+    }
     if (verify_retarget) {
         check_retarget(au);
     }
@@ -497,6 +511,10 @@ int main(int argc, char **argv) {
            au_nals, au_partial_nals, au_dropped_nals);
     printf("packet gaps seen by the depacketiser : %" PRIu64 "\n",
            au_lost_packets);
+    printf("keyframes       : %" PRIu64 " (%" PRIu64 " damaged)\n",
+           key_total, key_damaged);
+    printf("inter pictures  : %" PRIu64 " (%" PRIu64 " damaged)\n",
+           inter_total, inter_damaged);
     printf("pictures with no first slice : %" PRIu64 "\n", au_no_first_slice);
     if (r.first_slice_dropped) {
         printf("first-slice packets dropped  : %" PRIu64 "\n",
