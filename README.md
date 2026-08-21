@@ -22,7 +22,7 @@ into a player, a GStreamer element, or a test harness.
 | FlexFEC (RFC 8627) recovery | **done** — verified against a real camera capture |
 | RTP depacketisation (RFC 6184 / 7798) | **done** — byte-exact against the wire |
 | slice salvage and first-slice synthesis | **done** — measured against a real decoder |
-| end-to-end over a Gilbert-Elliott channel | **done** — `scripts/e2e.sh` |
+| end-to-end over a Gilbert-Elliott channel | **done** — `scripts/e2e.sh` (software), Rockchip MPP (below) |
 
 ## Building
 
@@ -172,6 +172,36 @@ would move from the inter slices that barely need it to the keyframes that do,
 first-slice loss on inter pictures would become common again, and the salvage
 stage would go from backstop to load-bearing. That is an argument for making
 both, not for choosing between them.
+
+### On the real decoder
+
+Everything above uses a software decoder as a stand-in. The point of the
+exercise is a robot's *hardware* decoder, which conceals damage differently, so
+the receiver was also run against real Rockchip RKVDEC/MPP on an RK3588
+(`rkvdec-slice-lab/scripts/96-mpp-e2e.sh`). Same bounded-group FlexFEC capture,
+a Gilbert-Elliott channel, and MPP reporting frames produced and its own
+per-frame errinfo — 211-frame reference:
+
+```
+loss   raw            fec            fec+salvage
+1%     210 / err 7    211 / err 2    211 / err 2
+5%     204 / err 73   211 / err 17   211 / err 18
+10%    190 / err 148  209 / err 67   210 / err 53
+20%    173 / err 141  209 / err 83   211 / err 71
+```
+
+Raw loses up to 18% of its frames outright on the silicon and corrupts most of
+the rest; FEC holds the frame count near-complete and cuts MPP's own error count
+several-fold; salvage pulls errors down further once loss is high enough that
+first slices start going missing (10% and 20%), which is the crossover the
+software measurement predicted.
+
+One correction the hardware forced. The freeze latch — MPP recycling stale pool
+buffers when it stops decoding — is prevented by the decoder's `disable_error`
+setting, **not** by FEC: with the naive setting both raw and fec+salvage latch
+at 20%. So the two are complementary rather than the same thing — `disable_error`
+keeps the decoder running, FEC and salvage reduce the damage it has to run
+through. A receiver that ships one without the other is half a fix.
 
 ## What building the receiver found in the sender
 
