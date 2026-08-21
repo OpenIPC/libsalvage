@@ -1,0 +1,50 @@
+name: CI
+
+# The core, salvage-pcap and the unit tests are libc-only, so an ubuntu runner
+# with its stock gcc/clang builds and verifies everything with no extra
+# packages. salvage-play's optional decode backends are not exercised here —
+# they need GStreamer or Rockchip MPP and a real decoder.
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    # `make check` is the gate: unit tests, then a replay of the real camera
+    # capture at four loss rates that reconciles every rebuilt packet
+    # byte-for-byte against the wire. Run it under both compilers so a
+    # warning-clean, correct build is proven on each.
+    name: check (${{ matrix.cc }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        cc: [gcc, clang]
+    steps:
+      - uses: actions/checkout@v4
+      - name: make check
+        run: make check CC=${{ matrix.cc }}
+
+  asan:
+    # The same replay under AddressSanitizer + UBSan. halt_on_error makes a
+    # UBSan finding fail the job rather than only print, and abort_on_error does
+    # the same for ASan.
+    name: asan + ubsan
+    runs-on: ubuntu-latest
+    env:
+      ASAN_OPTIONS: abort_on_error=1:detect_leaks=1
+      UBSAN_OPTIONS: halt_on_error=1:print_stacktrace=1
+    steps:
+      - uses: actions/checkout@v4
+      - name: make asan
+        run: make asan
