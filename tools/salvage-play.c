@@ -34,24 +34,70 @@ typedef struct {
     uint8_t media_pt, fec_pt;
     uint64_t pics, repaired;
     int frames;
+
+    /* Modes, so one binary is the whole matrix: raw = no recovery, no salvage;
+     * fec = recover only; default = recover then salvage. */
+    bool no_fec, no_salvage;
+
+    /* Gilbert-Elliott loss, same model as salvage-pcap: q = 1/mean_burst is
+     * the chance of leaving the bad state, p = q*loss/(1-loss) of entering it.
+     * Bursts are what defeat XOR FEC, so uniform loss would flatter it. */
+    double ge_p, ge_q;
+    bool ge_on, ge_bad;
+    uint64_t rng, dropped;
 } Play;
 
-static void on_pic(const uint8_t *pic, size_t len, bool repaired, void *ctx) {
-    Play *p = ctx;
+static void feed_decoder(Play *p, const uint8_t *annexb, size_t len, bool rep) {
     p->pics++;
-    p->repaired += repaired;
-    const int f = salvage_decoder_feed(p->dec, pic, len);
+    p->repaired += rep;
+    const int f = salvage_decoder_feed(p->dec, annexb, len);
     if (f >= 0) {
         p->frames = f;
     }
 }
 
+static void on_pic(const uint8_t *pic, size_t len, bool repaired, void *ctx) {
+    feed_decoder(ctx, pic, len, repaired);
+}
+
 static void on_au(const SalvageAu *au, void *ctx) {
-    salvage_input(((Play *)ctx)->stage, au);
+    Play *p = ctx;
+    if (p->no_salvage) {
+        /* Hand the depacketiser's access unit straight to the decoder — this
+         * is the "fec, no salvage" and "raw" path. */
+        feed_decoder(p, au->data, au->len, false);
+    } else {
+        salvage_input(p->stage, au);
+    }
 }
 
 static void on_out(const uint8_t *pkt, size_t len, bool recovered, void *ctx) {
     salvage_depay_input(((Play *)ctx)->depay, pkt, len, recovered);
+}
+
+/* xorshift64*, so a run of losses is reproducible from its seed. */
+static double next_random(Play *p) {
+    p->rng ^= p->rng >> 12;
+    p->rng ^= p->rng << 25;
+    p->rng ^= p->rng >> 27;
+    return (double)((p->rng * 2685821657736338717ull) >> 11) /
+           (double)(1ull << 53);
+}
+
+static bool ge_drop(Play *p) {
+    bool lost;
+    if (p->ge_bad) {
+        lost = true;
+        if (next_random(p) < p->ge_q) {
+            p->ge_bad = false;
+        }
+    } else {
+        lost = false;
+        if (next_random(p) < p->ge_p) {
+            p->ge_bad = true;
+        }
+    }
+    return lost;
 }
 
 /* --- pcap ------------------------------------------------------------- */
@@ -109,7 +155,17 @@ static void replay(const char *path, Play *p) {
             continue;
         }
         const uint8_t pt = (uint8_t)(rtp[1] & 0x7f);
-        if (pt == p->media_pt || pt == p->fec_pt) {
+        if (pt == p->media_pt) {
+            if (p->ge_on && ge_drop(p)) {
+                p->dropped++;
+                continue;
+            }
+            if (p->no_fec) {
+                on_out(rtp, rlen, false, p); /* straight to the depacketiser */
+            } else {
+                salvage_fec_input(p->fec, rtp, rlen);
+            }
+        } else if (pt == p->fec_pt && !p->no_fec) {
             salvage_fec_input(p->fec, rtp, rlen);
         }
     }
@@ -118,6 +174,8 @@ static void replay(const char *path, Play *p) {
 
 int main(int argc, char **argv) {
     const char *path = NULL, *out = NULL, *decname = "auto";
+    double loss_pct = 0.0, mean_burst = 1.0;
+    uint64_t seed = 1;
     SalvageCodec codec = SALVAGE_H264;
     SalvageDecoderConfig dc = {.tolerate_errors = true};
     SalvagePolicy pol = {SALVAGE_TRUNCATED_FORWARD, true};
@@ -143,6 +201,16 @@ int main(int argc, char **argv) {
             pol.synthesise_first_slice = false;
         } else if (!strcmp(argv[i], "--intolerant")) {
             dc.tolerate_errors = false;
+        } else if (!strcmp(argv[i], "--no-fec")) {
+            p.no_fec = true;
+        } else if (!strcmp(argv[i], "--no-salvage")) {
+            p.no_salvage = true;
+        } else if (!strcmp(argv[i], "--loss") && i + 1 < argc) {
+            loss_pct = atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--mean-burst") && i + 1 < argc) {
+            mean_burst = atof(argv[++i]);
+        } else if (!strcmp(argv[i], "--seed") && i + 1 < argc) {
+            seed = (uint64_t)strtoull(argv[++i], NULL, 10);
         } else {
             path = argv[i];
         }
@@ -152,8 +220,9 @@ int main(int argc, char **argv) {
             stderr,
             "usage: %s [--decoder auto|null|gst|mpp] [--codec h264|h265]\n"
             "       [--dump out.yuv | --annexb out.264] [--drop-truncated]\n"
-            "       [--no-synth] [--intolerant] [--media-pt N] [--fec-pt N]"
-            " capture.pcap\n"
+            "       [--no-synth] [--intolerant] [--no-fec] [--no-salvage]\n"
+            "       [--loss PCT] [--mean-burst N] [--seed S]"
+            " [--media-pt N] [--fec-pt N] capture.pcap\n"
             "backends compiled in: %s\n",
             argv[0], salvage_decoder_backends());
         return 2;
@@ -165,6 +234,14 @@ int main(int argc, char **argv) {
               : !strcmp(decname, "gst") ? SALVAGE_DECODER_GST
               : !strcmp(decname, "mpp") ? SALVAGE_DECODER_MPP
                                         : SALVAGE_DECODER_AUTO;
+
+    if (loss_pct > 0.0) {
+        const double loss = loss_pct / 100.0;
+        p.ge_q = mean_burst > 1.0 ? 1.0 / mean_burst : 1.0;
+        p.ge_p = loss < 1.0 ? p.ge_q * loss / (1.0 - loss) : 1.0;
+        p.ge_on = true;
+        p.rng = seed ? seed : 1;
+    }
 
     p.dec = salvage_decoder_new(&dc);
     p.stage = salvage_new(codec, pol, 0, on_pic, &p);
@@ -180,6 +257,7 @@ int main(int argc, char **argv) {
     salvage_fec_flush(p.fec);
     salvage_depay_flush(p.depay);
     const int frames = salvage_decoder_finish(p.dec);
+    const int errs = salvage_decoder_errors(p.dec);
 
     SalvageStats sv;
     salvage_stats(p.stage, &sv);
@@ -188,7 +266,13 @@ int main(int argc, char **argv) {
     printf("first slice synth : %llu made, %llu could not be\n",
            (unsigned long long)sv.first_slice_synthesised,
            (unsigned long long)sv.first_slice_unrepaired);
+    if (p.ge_on) {
+        printf("dropped by us     : %llu\n", (unsigned long long)p.dropped);
+    }
     printf("frames decoded    : %d\n", frames);
+    if (errs > 0) {
+        printf("decoder errinfo   : %d frames\n", errs);
+    }
 
     salvage_decoder_free(p.dec);
     salvage_free(p.stage);

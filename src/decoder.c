@@ -47,6 +47,11 @@ static int null_finish(void *self) {
     return ((NullDec *)self)->aus;
 }
 
+static int null_errors(void *self) {
+    (void)self;
+    return 0;
+}
+
 static void null_free(void *self) {
     NullDec *d = self;
     if (d != NULL) {
@@ -58,7 +63,7 @@ static void null_free(void *self) {
 }
 
 static const SalvageDecoderVtable NULL_VT = {
-    null_create, null_feed, null_finish, null_free};
+    null_create, null_feed, null_finish, null_errors, null_free};
 
 /* --- backends compiled in elsewhere ------------------------------------- */
 
@@ -117,6 +122,10 @@ int salvage_decoder_feed(
 
 int salvage_decoder_finish(SalvageDecoder *self) {
     return self->vt->finish(self->backend);
+}
+
+int salvage_decoder_errors(SalvageDecoder *self) {
+    return self->vt->errors != NULL ? self->vt->errors(self->backend) : 0;
 }
 
 void salvage_decoder_free(SalvageDecoder *self) {

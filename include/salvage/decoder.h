@@ -67,6 +67,10 @@ int salvage_decoder_feed(SalvageDecoder *self, const uint8_t *annexb, size_t len
 /* Flush and return total frames decoded. */
 int salvage_decoder_finish(SalvageDecoder *self);
 
+/* Frames the decoder flagged with errinfo/discard, where the backend reports it
+ * (MPP does; GStreamer conceals silently, so it returns 0). */
+int salvage_decoder_errors(SalvageDecoder *self);
+
 void salvage_decoder_free(SalvageDecoder *self);
 
 /* Which backends were compiled in, for the CLI to report. */

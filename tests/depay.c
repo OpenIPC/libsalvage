@@ -133,10 +133,10 @@ static void test_slices_are_one_picture(void) {
     Caught c = {0};
     SalvageDepay *d = salvage_depay_new(SALVAGE_H264, 0, on_au, &c);
 
-    /* The majestic/smolrtsp sender sets the marker at the end of every NAL,
-     * not every access unit. A receiver that believes it turns each slice into
-     * its own picture, which is how "hardware decoders cannot do slices" gets
-     * diagnosed when the real fault is in the sender. */
+    /* Some senders set the marker at the end of every NAL, not every access
+     * unit. A receiver that believes it turns each slice into its own picture,
+     * which is how "hardware decoders cannot do slices" gets diagnosed when the
+     * real fault is in the sender. */
     for (int i = 0; i < 8; i++) {
         const uint8_t s[] = {0x41, i == 0 ? SLICE_FIRST : SLICE_LATER,
                              (uint8_t)i};

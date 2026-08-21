@@ -14,8 +14,8 @@
  * table saying which NAL units are whole, which were cut short by loss, and
  * which slice of the picture each one carries — enough for the caller to
  * decide what to hand the decoder, which is a decision that has to be made per
- * platform rather than in a library (see rkvdec-slice-lab: forwarding a
- * truncated slice helps on Intel and hurts on Rockchip).
+ * platform rather than in a library: forwarding a truncated slice was
+ * measured to help on Intel and hurt on Rockchip.
  *
  * Feed it the packets released by the FlexFEC layer, in sequence order. Gaps
  * are inferred from the sequence numbers, so no separate loss signal is needed.

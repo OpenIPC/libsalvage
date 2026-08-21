@@ -151,4 +151,4 @@ static void gst_free(void *self) {
 }
 
 const SalvageDecoderVtable salvage_decoder_gst_vt = {
-    gst_create, gst_feed, gst_finish, gst_free};
+    gst_create, gst_feed, gst_finish, NULL, gst_free};

@@ -5,8 +5,7 @@
  * boundaries in a byte stream — the receiver has done that work. disable_error
  * makes it decode past a bad frame instead of freeze-latching on a stale pool
  * buffer, which the end-to-end measurements showed is what separates a decoder
- * that survives loss from one that gives up. Buffer-group handling ported from
- * rkvdec-slice-lab/tools/slice_probe.c.
+ * that survives loss from one that gives up.
  */
 
 #include <salvage/decoder.h>
@@ -170,6 +169,10 @@ static int mpp_be_finish(void *self) {
     return d->frames;
 }
 
+static int mpp_be_errors(void *self) {
+    return ((MppDec *)self)->err_frames;
+}
+
 static void mpp_be_free(void *self) {
     MppDec *d = self;
     if (d == NULL) {
@@ -191,4 +194,4 @@ static void mpp_be_free(void *self) {
 }
 
 const SalvageDecoderVtable salvage_decoder_mpp_vt = {
-    mpp_be_create, mpp_be_feed, mpp_be_finish, mpp_be_free};
+    mpp_be_create, mpp_be_feed, mpp_be_finish, mpp_be_errors, mpp_be_free};

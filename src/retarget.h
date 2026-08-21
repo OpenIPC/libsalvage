@@ -17,10 +17,9 @@
  * and no CABAC re-alignment: parse forward to the offset, patch in place, redo
  * emulation prevention. The RBSP length never changes.
  *
- * Ported from the Python in rkvdec-slice-lab (tools/h264bits.py, h265bits.py),
- * which was validated against real decoders: 46.05 dB whole-picture damage
- * became 66.10 dB confined to the lost slice, MPP errinfo went 60 -> 0, and
- * stock unpatched ffmpeg went from 25 decoded frames to 161.
+ * Validated against real decoders: 46.05 dB whole-picture damage became 66.10
+ * dB confined to the lost slice, MPP errinfo went 60 -> 0, and stock unpatched
+ * ffmpeg went from 25 decoded frames to 161.
  *
  * Deliberately narrow. Every function refuses stream shapes it does not fully
  * understand rather than guessing, because a slice that is silently wrong is

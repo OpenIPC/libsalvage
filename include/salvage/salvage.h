@@ -18,8 +18,8 @@
  * first it is a policy question rather than a fact. A truncated slice helps on
  * Intel (0.49% dirty pixels against 0.90% if dropped) and hurts on Rockchip
  * (30.80% against 25.47%). The right answer is a property of the decoder, so it
- * is a parameter here and the commissioning harness in rkvdec-slice-lab exists
- * to measure it per platform rather than inherit someone else's guess.
+ * is a parameter here, and salvage-play (the reference player) doubles as the
+ * commissioning harness to measure it per platform rather than inherit a guess.
  */
 
 #include <salvage/depay.h>

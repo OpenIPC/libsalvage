@@ -10,6 +10,7 @@ typedef struct {
     void *(*create)(const SalvageDecoderConfig *cfg);
     int (*feed)(void *self, const uint8_t *annexb, size_t len);
     int (*finish)(void *self);
+    int (*errors)(void *self); /* may be NULL */
     void (*free)(void *self);
 } SalvageDecoderVtable;
 

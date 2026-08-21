@@ -12,7 +12,7 @@
 #   fec          FlexFEC recovery only
 #   fec+salvage  recovery, then a synthesised first slice where one was lost
 #
-# The channel is parameterised the same way as ../majestic/2026-08-06-ltr/
+# The channel is parameterised the same way as an RS(k,k+r) outage model; 
 # fecsim.py (mean loss and mean burst length), so measurements here and
 # predictions there are directly comparable.
 #

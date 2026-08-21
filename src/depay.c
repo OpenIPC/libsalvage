@@ -26,8 +26,8 @@ struct SalvageDepay {
 
     /* The marker bit is meant to end an access unit (RFC 6184 §5.1), and
      * trusting it lets an AU be emitted without waiting for the next packet.
-     * But senders get it wrong — the majestic/smolrtsp sender sets it at the
-     * end of every NAL, which on a sliced stream means every slice looks like
+     * But senders get it wrong — some set it at the end of every NAL, which
+     * on a sliced stream then makes every slice look like
      * its own picture. So the marker has to earn trust: stay on timestamps
      * until it has been right MARKER_TRUST_MIN times running, and never
      * believe it again once it lies. Costs one packet of latency at startup

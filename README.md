@@ -10,10 +10,9 @@ wrong: a picture with one slice missing is still most of a picture, and the
 difference between showing it and freezing is the difference between flying and
 landing.
 
-This is the receive side of the FlexFEC work in
-[majestic](https://github.com/OpenIPC/majestic); the sender is the other half.
-It is a plain C library with no dependencies beyond libc, so it can be linked
-into a player, a GStreamer element, or a test harness.
+It is the receive half of a FlexFEC video link; the sender is any RFC 8627
+source. It is a plain C library with no dependencies beyond libc, so it can be
+linked into a player, a GStreamer element, or a test harness.
 
 ## Status
 
@@ -75,7 +74,7 @@ measure the per-platform policy bits rather than inherit them.
 ## What "verified" means here
 
 `tests/camera-fec.pcap` is a real capture of a SigmaStar SSC30KQ camera
-streaming H.264 with the majestic FlexFEC sender enabled: 3480 media packets
+streaming H.264 with a FlexFEC sender enabled: 3480 media packets
 (PT 96) and 1399 repair packets (PT 101).
 
 `salvage-pcap` replays it, drops packets on the way in, and compares every
@@ -158,10 +157,10 @@ constant: forwarding it measured better on Intel (0.49% dirty pixels against
 
 `scripts/e2e.sh` replays the capture over a Gilbert-Elliott channel, runs it
 through the receiver, decodes the result and measures it against the intact
-stream. The channel takes the same two parameters as
-`majestic/2026-08-06-ltr/fecsim.py` — mean loss and mean burst length — so what
-is measured here and what that predicts can be put side by side. Runs are seeded,
-so a result can be reproduced exactly.
+stream. The channel takes two parameters — mean loss and mean burst length —
+that map onto a standard Gilbert-Elliott channel and an RS(k, k+r) outage model,
+so what is measured here can be put beside such a model's prediction. Runs are
+seeded, so a result can be reproduced exactly.
 
 ```
 channel: Gilbert-Elliott, mean burst 4, seed 1        reference: 163 frames
@@ -214,65 +213,62 @@ both, not for choosing between them.
 
 Everything above uses a software decoder as a stand-in. The point of the
 exercise is a robot's *hardware* decoder, which conceals damage differently, so
-the receiver was also run against real Rockchip RKVDEC/MPP on an RK3588
-(`rkvdec-slice-lab/scripts/96-mpp-e2e.sh`). Same bounded-group FlexFEC capture,
-a Gilbert-Elliott channel, and MPP reporting frames produced and its own
-per-frame errinfo — 211-frame reference:
+the receiver was run against real Rockchip RKVDEC/MPP on an RK3588
+(`DECODER=mpp scripts/hw-e2e.sh` — the whole run is `salvage-play`, nothing
+external). MPP is fed one access unit per packet with `disable_error`, so it
+decodes *every* picture the receiver hands it and reports which ones it had to
+paper over as errinfo. 212-frame reference (MPP emits one frame more than the
+211 access units — an MPP quirk, constant across configs):
 
 ```
 loss   raw            fec            fec+salvage
-1%     210 / err 7    211 / err 2    211 / err 2
-5%     204 / err 73   211 / err 17   211 / err 18
-10%    190 / err 148  209 / err 67   210 / err 53
-20%    173 / err 141  209 / err 83   211 / err 71
+1%     212 / err 6    212 / err 2    212 / err 2
+5%     211 / err 43   212 / err 18   212 / err 18
+10%    211 / err 89   212 / err 40   212 / err 40
+20%    210 / err 127  212 / err 65   212 / err 64
 ```
 
-Raw loses up to 18% of its frames outright on the silicon and corrupts most of
-the rest; FEC holds the frame count near-complete and cuts MPP's own error count
-several-fold; salvage pulls errors down further once loss is high enough that
-first slices start going missing (10% and 20%), which is the crossover the
-software measurement predicted.
-
-One correction the hardware forced. The freeze latch — MPP recycling stale pool
-buffers when it stops decoding — is prevented by the decoder's `disable_error`
-setting, **not** by FEC: with the naive setting both raw and fec+salvage latch
-at 20%. So the two are complementary rather than the same thing — `disable_error`
-keeps the decoder running, FEC and salvage reduce the damage it has to run
-through. A receiver that ships one without the other is half a fix.
+The frame count barely moves — MPP decodes past the damage rather than dropping
+pictures — so the payoff shows up in the error count: FEC roughly halves the
+frames MPP has to conceal, and at heavy loss it is the difference between one
+frame in six flagged and one in fifty. `disable_error` is what keeps the decoder
+running (without it MPP freeze-latches, recycling stale pool buffers); FEC and
+salvage reduce the damage it has to run through. A receiver needs both.
 
 ### And on the other decoder
 
-The design targets two decoders, so the same run was repeated on Intel VA-API
-(Radxa X4, Alder Lake-N; `rkvdec-slice-lab/scripts/97-vaapi-e2e.sh`). The frame
-counts come out **nearly identical to Rockchip** — the loss, not the decoder,
-decides which pictures survive:
+The design targets two decoders, so the same run went to Intel VA-API (Radxa X4,
+Alder Lake-N; `DECODER=gst scripts/hw-e2e.sh`, GStreamer `decodebin` selecting
+`vah264dec`). Here the failure mode is the opposite, and that is the point:
 
 ```
-loss   raw   fec   fec+salvage      Rockchip MPP, same order
-1%     210   211   211              210 / 211 / 211
-5%     204   211   211              204 / 211 / 211
-10%    190   209   210              190 / 209 / 210
-20%    173   209   211              173 / 209 / 211
+loss   raw   fec   fec+salvage      (211-frame reference)
+1%     210   211   211
+5%     204   211   211
+10%    190   209   210
+20%    173   209   211
 ```
 
-FEC keeps whole pictures on the wire and it pays off the same on both silicons.
-What differs is how each decoder handles the damage FEC could not repair, and
-this is the per-platform divergence the design assumed:
+GStreamer's decoder does **not** decode past a bad picture — it conceals by
+dropping or repeating a frame — so on the raw stream the frame count falls, up
+to 18% at 20% loss, and FEC restores it. Where MPP kept every frame and paid in
+errinfo, VA-API pays in lost frames; FEC and salvage fix both, but the thing
+they fix is different.
 
-- **GStreamer `vah264dec`** (the robust VA-API path) conceals a lost slice by
-  repeating a nearby frame — bit-identical pairs show up on the damaged streams
-  and none on the clean decode, so the repeats are real concealment. MPP with
-  `disable_error` instead corrupts in place and keeps every frame distinct.
-- **Stock `ffmpeg -hwaccel vaapi`** does not tolerate errors at all: it aborts
-  on the first bad packet — it will not even finish the clean clip here — so at
-  20% loss it yields *zero* frames. That is the VA-API counterpart of MPP's
-  freeze latch, and worse: nothing comes out.
+That divergence is the whole reason the decoder is a per-platform component:
 
-So the robust decoder is a different component on each platform (`vah264dec`
-versus MPP with `disable_error`), and the naive one fails in a different way
-(repeat-conceal versus abort versus latch). The receiver has to know which it is
-talking to — which is what the per-platform policy and the commissioning step
-are for — but FEC's job, delivering whole pictures, is platform-independent.
+- **MPP** with `disable_error` corrupts in place and keeps every frame; the
+  damage is an errinfo flag.
+- **GStreamer `vah264dec`** conceals by dropping/repeating frames; the damage is
+  a missing picture (bit-identical repeats show up on the damaged streams and
+  none on the clean decode, so the repeats are real concealment).
+- **Stock `ffmpeg -hwaccel vaapi`** does not tolerate errors at all — it aborts
+  on the first bad packet and will not even finish the clean clip, so it is not
+  a usable robust decoder here.
+
+The receiver has to know which decoder it is talking to — which is what the
+per-platform policy and the `salvage-play` commissioning options are for — but
+FEC's job, delivering whole pictures, pays off on both.
 
 ## What building the receiver found in the sender
 
@@ -292,7 +288,7 @@ markers 1062   pictures 131   markers not at a picture boundary: 931
 A receiver that believes the marker therefore sees each slice as a whole
 picture. That is a plausible route to "the hardware decoder can't handle
 slices" — the decoder is handed eight one-slice pictures and does exactly what
-it was told. Fixed in majestic (`sstar: mark the real end of an access unit`),
+it was told. Fixed on the sender by marking the real end of the access unit,
 after which the same measurement gives 171 markers for 171 pictures, none
 misplaced.
 
@@ -390,14 +386,6 @@ coverage is contiguous rather than trusting packet accounting.
 The unit tests build their own repair packets straight from RFC 8627 rather
 than calling a shared helper, so an encoder and a decoder that share a
 misreading of the spec cannot both pass.
-
-## Related
-
-- [rkvdec-slice-lab](../rkvdec-slice-lab) — the measurements this is built on:
-  what hardware decoders actually do with missing slices, on Rockchip, Intel
-  VA-API and GStreamer, and why a lost *first* slice is categorically worse
-  than any other.
-- majestic branch `feat/rtsp-flexfec` — the sender.
 
 ## Licence
 
