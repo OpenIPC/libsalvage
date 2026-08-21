@@ -22,7 +22,7 @@ into a player, a GStreamer element, or a test harness.
 | FlexFEC (RFC 8627) recovery | **done** — verified against a real camera capture |
 | RTP depacketisation (RFC 6184 / 7798) | **done** — byte-exact against the wire |
 | slice salvage and first-slice synthesis | **done** — measured against a real decoder |
-| end-to-end over a Gilbert-Elliott channel | **done** — `scripts/e2e.sh` (software), Rockchip MPP (below) |
+| end-to-end over a Gilbert-Elliott channel | **done** — software, Rockchip MPP, and Intel VA-API (below) |
 
 ## Building
 
@@ -202,6 +202,40 @@ setting, **not** by FEC: with the naive setting both raw and fec+salvage latch
 at 20%. So the two are complementary rather than the same thing — `disable_error`
 keeps the decoder running, FEC and salvage reduce the damage it has to run
 through. A receiver that ships one without the other is half a fix.
+
+### And on the other decoder
+
+The design targets two decoders, so the same run was repeated on Intel VA-API
+(Radxa X4, Alder Lake-N; `rkvdec-slice-lab/scripts/97-vaapi-e2e.sh`). The frame
+counts come out **nearly identical to Rockchip** — the loss, not the decoder,
+decides which pictures survive:
+
+```
+loss   raw   fec   fec+salvage      Rockchip MPP, same order
+1%     210   211   211              210 / 211 / 211
+5%     204   211   211              204 / 211 / 211
+10%    190   209   210              190 / 209 / 210
+20%    173   209   211              173 / 209 / 211
+```
+
+FEC keeps whole pictures on the wire and it pays off the same on both silicons.
+What differs is how each decoder handles the damage FEC could not repair, and
+this is the per-platform divergence the design assumed:
+
+- **GStreamer `vah264dec`** (the robust VA-API path) conceals a lost slice by
+  repeating a nearby frame — bit-identical pairs show up on the damaged streams
+  and none on the clean decode, so the repeats are real concealment. MPP with
+  `disable_error` instead corrupts in place and keeps every frame distinct.
+- **Stock `ffmpeg -hwaccel vaapi`** does not tolerate errors at all: it aborts
+  on the first bad packet — it will not even finish the clean clip here — so at
+  20% loss it yields *zero* frames. That is the VA-API counterpart of MPP's
+  freeze latch, and worse: nothing comes out.
+
+So the robust decoder is a different component on each platform (`vah264dec`
+versus MPP with `disable_error`), and the naive one fails in a different way
+(repeat-conceal versus abort versus latch). The receiver has to know which it is
+talking to — which is what the per-platform policy and the commissioning step
+are for — but FEC's job, delivering whole pictures, is platform-independent.
 
 ## What building the receiver found in the sender
 
